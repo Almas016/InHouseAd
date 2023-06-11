@@ -17,7 +17,7 @@ func Start() {
 	}
 
 	// Start the website availability checker
-	go wc.CheckAvailability()
+	go wc.CheckerWithTicker()
 
 	// Create the web handler
 	handler := handlers.NewHandler(wc)

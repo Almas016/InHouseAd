@@ -14,6 +14,7 @@ import (
 
 type WebsiteChecker struct {
 	Websites      map[string]time.Duration
+	urls          []string
 	MinAccessTime model.Website
 	MaxAccessTime model.Website
 	mu            sync.RWMutex
@@ -35,55 +36,66 @@ func (wc *WebsiteChecker) LoadWebsitesFromFile(filename string) error {
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line != "" {
-			if !strings.HasPrefix(line, "http://") && !strings.HasPrefix(line, "https://") {
-				line = "http://" + line // Add "http://" if not present
-			}
-
-			parsedURL, err := url.Parse(line)
-			if err != nil {
-				log.Printf("Invalid URL: %s", line)
-				continue
-			}
-
-			wc.mu.Lock()
-			wc.Websites[parsedURL.String()] = -1
-			wc.mu.Unlock()
-			log.Printf("Loaded website: %s", parsedURL.String())
+		if line == "" {
+			continue
 		}
+
+		if !strings.HasPrefix(line, "http://") && !strings.HasPrefix(line, "https://") {
+			line = "http://" + line // Add "http://" if not present
+		}
+
+		parsedURL, err := url.Parse(line)
+		if err != nil {
+			log.Printf("Invalid URL: %s", line)
+			continue
+		}
+
+		wc.urls = append(wc.urls, parsedURL.String())
+		log.Printf("Loaded website: %s", parsedURL.String())
 	}
 
 	return nil
 }
 
+func (wc *WebsiteChecker) CheckerWithTicker() {
+	t := time.NewTicker(time.Minute)
+	for range t.C {
+		wc.CheckAvailability()
+	}
+}
+
 func (wc *WebsiteChecker) CheckAvailability() {
 	wc.MinAccessTime.AccessTime = time.Minute
+	ch := make(chan string)
+	go func() {
+		for _, url := range wc.urls {
+			ch <- url
+		}
+		close(ch)
+	}()
+	numWorker := 16
 	var wg sync.WaitGroup
-	for {
-		wc.mu.RLock()
-		for url := range wc.Websites {
-			wg.Add(1)
-			go func(u string) {
-				accessTime := wc.checkWebsiteAvailability(u)
+	for i := 0; i < numWorker; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for url := range ch {
+				accessTime := wc.checkWebsiteAvailability(url)
 				wc.mu.Lock()
 				if wc.MinAccessTime.AccessTime > accessTime && accessTime > -1 {
 					wc.MinAccessTime.AccessTime = accessTime
-					wc.MinAccessTime.URL = u
+					wc.MinAccessTime.URL = url
 				}
 				if wc.MaxAccessTime.AccessTime < accessTime {
 					wc.MaxAccessTime.AccessTime = accessTime
-					wc.MaxAccessTime.URL = u
+					wc.MaxAccessTime.URL = url
 				}
-				wc.Websites[u] = accessTime
+				wc.Websites[url] = accessTime
 				wc.mu.Unlock()
-				wg.Done()
-			}(url)
-		}
-		wc.mu.RUnlock()
-
-		wg.Wait()
-		time.Sleep(time.Minute)
+			}
+		}()
 	}
+	wg.Wait()
 }
 
 func (wc *WebsiteChecker) checkWebsiteAvailability(url string) time.Duration {
@@ -103,13 +115,16 @@ func (wc *WebsiteChecker) GetAccessTime(url string) (*model.Website, error) {
 	wc.mu.RLock()
 	defer wc.mu.RUnlock()
 	t, ok := wc.Websites[url]
-	if ok {
-		return &model.Website{
-			URL:        url,
-			AccessTime: t,
-		}, nil
+	if !ok {
+		return nil, fmt.Errorf("Website not found")
 	}
-	return nil, fmt.Errorf("Website not found")
+	if t == -1 {
+		return nil, fmt.Errorf("Website not found")
+	}
+	return &model.Website{
+		URL:        url,
+		AccessTime: t,
+	}, nil
 }
 
 func (wc *WebsiteChecker) GetMinAccessTime() model.Website {
